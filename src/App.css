@@ -1,0 +1,64 @@
+/* Add logo styling */
+.client-logo {
+  padding: 0 24px;
+  font-size: 1.2em;
+  font-weight: bold;
+  display: flex;
+  align-items: center;
+}
+
+/* Update existing styles */
+.site-layout-content {
+  min-height: 280px;
+  padding: 24px;
+  background: #fff;
+  margin-top: 24px;
+}
+
+.welcome-message {
+  text-align: center;
+  margin-top: 100px;
+  padding: 24px;
+}
+
+.ant-layout-header {
+  display: flex;
+  justify-content: space-between;
+}
+/* Allocate CIDR Page Styles */
+.allocate-container {
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 24px;
+  text-align: left;
+}
+
+.cidr-display-area {
+  margin: 20px 0;
+  min-height: 60px;
+}
+
+.cidr-alert {
+  text-align: left;
+  margin: 10px 0;
+}
+
+.cidr-alert .ant-alert-message {
+  font-size: 16px;
+}
+
+.cidr-message {
+  letter-spacing: 0.5px;
+}
+
+.button-group {
+  margin-top: 24px;
+  gap: 16px;
+  display: flex;
+  justify-content: flex-start;
+}
+
+/* Ensure buttons stay left-aligned */
+.ant-btn {
+  min-width: 160px;
+}

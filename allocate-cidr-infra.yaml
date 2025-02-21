@@ -1,0 +1,187 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CIDR Allocation System with Public API
+
+Parameters:
+  ExistingDynamoDBTable:
+    Type: String
+    Default: CIDRAllocations
+  AllowedOrigin:
+    Type: String
+    Default: "'*'"  # Restrict to specific domain in production
+
+Resources:
+  # Lambda Execution Role
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Scan
+                Resource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ExistingDynamoDBTable}
+
+  # Lambda Function
+  CIDRAllocationLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: CIDRAllocationHandler
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import os
+          
+          dynamodb = boto3.resource('dynamodb')
+          table_name = os.environ['DYNAMODB_TABLE']
+          table = dynamodb.Table(table_name)
+          
+          def lambda_handler(event, context):
+              headers = {
+                  'Access-Control-Allow-Origin': os.environ['ALLOWED_ORIGIN'],
+                  'Access-Control-Allow-Headers': 'Content-Type',
+                  'Access-Control-Allow-Methods': 'OPTIONS,POST'
+              }
+              
+              try:
+                  response = table.get_item(Key={'cidr_block': 'GlobalCounter'})
+                  current = int(response.get('Item', {}).get('value', 167772160))
+                  
+                  while True:
+                      cidr = f"10.{(current >> 16) & 0xFF}.{(current >> 8) & 0xFF}.0/21"
+                      response = table.get_item(Key={'cidr_block': cidr})
+                      if 'Item' not in response:
+                          table.put_item(Item={
+                              'cidr_block': cidr,
+                              'allocation_status': 'Allocated',
+                              'purpose': 'Manual Allocation'
+                          })
+                          table.update_item(
+                              Key={'cidr_block': 'GlobalCounter'},
+                              UpdateExpression='SET #v = :val',
+                              ExpressionAttributeNames={'#v': 'value'},
+                              ExpressionAttributeValues={':val': current + 2048}
+                          )
+                          return {
+                              'statusCode': 200,
+                              'headers': headers,
+                              'body': json.dumps({'cidr': cidr})
+                          }
+                      current += 2048
+              
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'headers': headers,
+                      'body': json.dumps({'error': str(e)})
+                  }
+      Environment:
+        Variables:
+          DYNAMODB_TABLE: !Ref ExistingDynamoDBTable
+          ALLOWED_ORIGIN: !Ref AllowedOrigin
+
+  # API Gateway with explicit resource/method definitions
+  CIDRAllocationAPI:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: CIDRAllocationAPI
+      EndpointConfiguration:
+        Types: [REGIONAL]
+
+  RootResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref CIDRAllocationAPI
+      ParentId: !GetAtt CIDRAllocationAPI.RootResourceId
+      PathPart: "{proxy+}"
+
+  AllocationResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref CIDRAllocationAPI
+      ParentId: !GetAtt CIDRAllocationAPI.RootResourceId
+      PathPart: allocate
+
+  AllocationMethod:
+    Type: AWS::ApiGateway::Method
+    DependsOn: CIDRAllocationLambda
+    Properties:
+      RestApiId: !Ref CIDRAllocationAPI
+      ResourceId: !Ref AllocationResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 
+          - arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations
+          - FunctionArn: !GetAtt CIDRAllocationLambda.Arn
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+
+  OptionsMethod:
+    Type: AWS::ApiGateway::Method
+    DependsOn: AllocationResource
+    Properties:
+      RestApiId: !Ref CIDRAllocationAPI
+      ResourceId: !Ref AllocationResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key'"
+              method.response.header.Access-Control-Allow-Origin: !Ref AllowedOrigin
+              method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Methods: true
+
+  APIDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: 
+      - AllocationMethod
+      - OptionsMethod
+    Properties:
+      RestApiId: !Ref CIDRAllocationAPI
+      StageName: prod
+
+  LambdaPermission:
+    Type: AWS::Lambda::Permission
+    DependsOn: CIDRAllocationLambda
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt CIDRAllocationLambda.Arn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${CIDRAllocationAPI}/*/*/*
+
+Outputs:
+  APIEndpoint:
+    Value: !Sub https://${CIDRAllocationAPI}.execute-api.${AWS::Region}.amazonaws.com/prod/allocate
